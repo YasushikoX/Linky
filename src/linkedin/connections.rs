@@ -32,7 +32,7 @@ pub async fn connect(
     for _ in 0..(connection_ammount / 20) {
         page.evaluate("document.querySelector('main#workspace').scrollTop += 2000")
             .await?;
-        tokio::time::sleep(Duration::from_secs(5)).await;
+        tokio::time::sleep(Duration::from_secs(2)).await;
     }
 
     let buttons = page.find_elements("button[aria-label*='connect']").await?;

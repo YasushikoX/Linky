@@ -1,4 +1,4 @@
-use std::{collections::HashSet, thread::sleep, time::Duration};
+use std::{collections::HashSet, time::Duration};
 
 use chromiumoxide::Page;
 use google_ai_rs::Client;
@@ -8,13 +8,14 @@ pub async fn comment_posts(
     comments_amount: i8,
     rating_threshold: i32,
     key: String,
-    _sample: String,
+    rating_sleep_ms: u64,
+    comment_sleep_ms: u64,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut count: i8 = 0;
     let mut commented_ids: HashSet<String> = HashSet::new();
 
     page.goto("https://www.linkedin.com/feed/").await?;
-    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
 
     // Removes messaging window
     page.evaluate("document.querySelectorAll('iframe')[1].contentDocument.querySelector('#msg-overlay')?.remove()").await?;
@@ -41,7 +42,6 @@ pub async fn comment_posts(
                 .await?
                 .into_value()?;
 
-            // Skip any post we've already touched
             if commented_ids.contains(&id) {
                 continue;
             }
@@ -58,24 +58,28 @@ pub async fn comment_posts(
             posts_data.push((i, id, text, 0));
         }
 
-        // Evaluate posts comentability
+        // Evaluate posts commentability
         for (_i, _id, text, rating) in posts_data.iter_mut() {
             let response = request(
                 key.clone(),
-                format!("Rate this LinkedIn post's commentability from 1-10 based on how easy it is to leave a comment. \
-                                High scores (8-10): personal experiences, lessons learned, opinions, stories, personal achivements. \
-                                Low scores (1-3): job search announcements, advertisment, generic motivational quotes. \
-                                Reply with ONLY a single number, nothing else. \
-                                \n\nPost:\n{}", text),
-                "gemini-3.1-flash-lite-preview".to_string()
-            ).await?;
+                format!(
+                    "Rate this LinkedIn post's commentability from 1-10 based on how easy it is to leave a comment. \
+                    High scores (8-10): personal experiences, lessons learned, opinions, stories, personal achievements. \
+                    Low scores (1-3): job search announcements, advertisement, generic motivational quotes. \
+                    Reply with ONLY a single number, nothing else. \
+                    \n\nPost:\n{}",
+                    text
+                ),
+                "gemini-3.1-flash-lite-preview".to_string(),
+            )
+            .await?;
 
             *rating = response.trim().parse().unwrap_or(0);
 
-            sleep(Duration::from_secs(1));
+            tokio::time::sleep(Duration::from_millis(rating_sleep_ms)).await;
         }
 
-        //Filter Data
+        // Filter by threshold
         let filtered: Vec<(usize, String, String, i32)> = posts_data
             .into_iter()
             .filter(|(_i, _id, _text, score)| *score >= rating_threshold)
@@ -84,14 +88,13 @@ pub async fn comment_posts(
         println!("Found {} to comment on", filtered.len());
 
         if filtered.is_empty() {
-            // No good posts on screen, scroll to load more
             page.evaluate("document.querySelector('main#workspace').scrollTop += 800")
                 .await?;
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            tokio::time::sleep(Duration::from_secs(2)).await;
             continue;
         }
 
-        //Comment on the posts
+        // Comment on the posts
         for (i, id, text, _rating) in filtered {
             if count >= comments_amount {
                 break;
@@ -101,13 +104,13 @@ pub async fn comment_posts(
                 key.clone(),
                 format!(
                     "Write a short genuine comment for this LinkedIn post. \
-                        Be positive, apreciative and nice.\
-                        Be conversational and human. \
-                        Be somewhat casual. \
-                        Use simple, conversational words. \
-                        Max 2 sentences. No hashtags. No emojis. \
-                        Respond with the comment only, nothing else.
-                        \n\nPost:\n{}",
+                    Be positive, appreciative and nice. \
+                    Be conversational and human. \
+                    Be somewhat casual. \
+                    Use simple, conversational words. \
+                    Max 2 sentences. No hashtags. No emojis. \
+                    Respond with the comment only, nothing else.\
+                    \n\nPost:\n{}",
                     text
                 ),
                 "gemini-3-flash-preview".to_string(),
@@ -116,7 +119,7 @@ pub async fn comment_posts(
 
             let comment = response.trim().replace('\'', "\\'").replace('\n', " ");
 
-            // try to open the comment field; if the button is missing just skip this post
+            // Click comment button
             let expanded: bool = page
                 .evaluate(format!(
                     r#"(() => {{
@@ -135,26 +138,25 @@ pub async fn comment_posts(
                 continue;
             }
 
-            sleep(Duration::from_secs(1));
+            tokio::time::sleep(Duration::from_secs(1)).await;
 
-            // insert comment into the editor that belongs to the current post
-            page
-                .evaluate(format!(
-                    r#"(() => {{
-                        const item = document.querySelectorAll('[role=\'listitem\']')[{}];
-                        const editor = item.querySelector("[aria-label='Text editor for creating comment']");
-                        if (!editor) return false;
-                        editor.focus();
-                        document.execCommand('insertText', false, '{}');
-                        return true;
-                    }})()"#,
-                    i,
-                    comment
-                ))
-                .await?;
+            // Type comment
+            page.evaluate(format!(
+                r#"(() => {{
+                    const item = document.querySelectorAll('[role=\'listitem\']')[{}];
+                    const editor = item.querySelector("[aria-label='Text editor for creating comment']");
+                    if (!editor) return false;
+                    editor.focus();
+                    document.execCommand('insertText', false, '{}');
+                    return true;
+                }})()"#,
+                i, comment
+            ))
+            .await?;
 
-            sleep(Duration::from_secs(10));
+            tokio::time::sleep(Duration::from_millis(comment_sleep_ms)).await;
 
+            // Submit comment
             let posted: bool = page
                 .evaluate(format!(
                     r#"(() => {{
@@ -178,11 +180,10 @@ pub async fn comment_posts(
 
             println!("Completed {}/{} comments", count, comments_amount);
 
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            tokio::time::sleep(Duration::from_secs(2)).await;
         }
 
-        // Scroll to load more posts after each batch
-
+        // Scroll to load more posts
         for _ in 0..3 {
             page.evaluate("document.querySelector('main#workspace').scrollTop += 2000")
                 .await?;
@@ -195,21 +196,38 @@ pub async fn comment_posts(
     Ok(())
 }
 
-//gemini-3-flash-preview
-//gemini-3.1-flash-lite-preview
+// gemini-3-flash-preview
+// gemini-3.1-flash-lite-preview
 pub async fn request(
     key: String,
     prompt: String,
     model: String,
 ) -> Result<String, Box<dyn std::error::Error>> {
-    let client = Client::new(key).await?;
-    let model = client.generative_model(&model);
+    let max_retries = 5;
+    let mut wait_secs = 10;
 
-    let mut chat = model.start_chat();
+    for attempt in 1..=max_retries {
+        let client = Client::new(key.clone()).await?;
+        let m = client.generative_model(&model);
+        let mut chat = m.start_chat();
 
-    let response = chat.send_message(prompt).await?;
+        match chat.send_message(prompt.clone()).await {
+            Ok(response) => return Ok(response.to_string()),
+            Err(e) => {
+                let msg = e.to_string();
+                if msg.contains("429") || msg.contains("rate") || msg.contains("quota") {
+                    println!(
+                        "⚠️ Rate limit hit, waiting {}s before retry {}/{}...",
+                        wait_secs, attempt, max_retries
+                    );
+                    tokio::time::sleep(Duration::from_secs(wait_secs)).await;
+                    wait_secs *= 2; // exponential backoff
+                } else {
+                    return Err(Box::new(e));
+                }
+            }
+        }
+    }
 
-    let text = response.to_string();
-
-    Ok(text)
+    Err("Rate limit: max retries exceeded".into())
 }

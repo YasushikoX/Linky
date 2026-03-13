@@ -1,7 +1,6 @@
 use chromiumoxide::cdp::browser_protocol::emulation::SetDeviceMetricsOverrideParams;
 use colored::Colorize;
 use dialoguer::{Input, Select, theme::ColorfulTheme};
-use std::io::BufRead;
 
 mod browser;
 mod config;
@@ -65,18 +64,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "→".blue(),
                     amount.to_string().bold()
                 );
+
+                if cfg.gemini_api_key.is_empty() {
+                    println!(
+                        "{} No API key set. Go to Settings → Set API Key first.\n",
+                        "✗".red().bold()
+                    );
+                    continue;
+                }
+
                 linkedin::feed::comment_posts(
                     &page,
                     amount,
                     cfg.rating_threshold,
                     cfg.gemini_api_key.clone(),
-                    cfg.sample.clone(),
+                    cfg.rating_sleep_ms,
+                    cfg.comment_sleep_ms,
                 )
                 .await?;
                 println!("{} Done!\n", "✓".green().bold());
             }
             2 => {
-                let settings_options = vec!["Set API Key", "Set Writing Sample", "Back"];
+                let settings_options = vec!["Set API Key", "Set Default Amounts", "Back"];
 
                 let settings_selection = Select::with_theme(&ColorfulTheme::default())
                     .with_prompt("Settings")
@@ -94,22 +103,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         println!("{} API key saved\n", "✓".green().bold());
                     }
                     1 => {
-                        println!(
-                            "Paste a description of your writing style, then press Enter twice when done:"
-                        );
-                        let mut sample = String::new();
-                        let stdin = std::io::stdin();
-                        for line in stdin.lock().lines() {
-                            let line = line?;
-                            if line.is_empty() {
-                                break;
-                            }
-                            sample.push_str(&line);
-                            sample.push('\n');
-                        }
-                        cfg.sample = sample;
+                        cfg.default_connect_amount = Input::with_theme(&ColorfulTheme::default())
+                            .with_prompt("Default connect amount")
+                            .default(cfg.default_connect_amount)
+                            .interact()?;
+                        cfg.default_comment_amount = Input::with_theme(&ColorfulTheme::default())
+                            .with_prompt("Default comment amount")
+                            .default(cfg.default_comment_amount)
+                            .interact()?;
+                        cfg.rating_threshold = Input::with_theme(&ColorfulTheme::default())
+                            .with_prompt("Rating threshold (1-10)")
+                            .default(cfg.rating_threshold)
+                            .interact()?;
+                        cfg.rating_sleep_ms = Input::with_theme(&ColorfulTheme::default())
+                            .with_prompt("Sleep between rating posts (ms)")
+                            .default(cfg.rating_sleep_ms)
+                            .interact()?;
+                        cfg.comment_sleep_ms = Input::with_theme(&ColorfulTheme::default())
+                            .with_prompt("Sleep before posting comment (ms)")
+                            .default(cfg.comment_sleep_ms)
+                            .interact()?;
                         cfg.save();
-                        println!("{} Writing sample saved\n", "✓".green().bold());
+                        println!("{} Settings saved\n", "✓".green().bold());
                     }
                     _ => {}
                 }
