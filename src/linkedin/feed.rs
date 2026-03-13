@@ -13,6 +13,7 @@ pub async fn comment_posts(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut count: i8 = 0;
     let mut commented_ids: HashSet<String> = HashSet::new();
+    let mut seen_ids: HashSet<String> = HashSet::new(); // tracks posts already rated
 
     page.goto("https://www.linkedin.com/feed/").await?;
     tokio::time::sleep(Duration::from_secs(2)).await;
@@ -21,7 +22,6 @@ pub async fn comment_posts(
     page.evaluate("document.querySelectorAll('iframe')[1].contentDocument.querySelector('#msg-overlay')?.remove()").await?;
 
     while count < comments_amount {
-        // index, unique id, text, rating
         let mut posts_data: Vec<(usize, String, String, i32)> = Vec::new();
 
         // Get posts text for evaluation
@@ -42,7 +42,8 @@ pub async fn comment_posts(
                 .await?
                 .into_value()?;
 
-            if commented_ids.contains(&id) {
+            // Skip already commented or already rated posts
+            if commented_ids.contains(&id) || seen_ids.contains(&id) {
                 continue;
             }
 
@@ -59,7 +60,7 @@ pub async fn comment_posts(
         }
 
         // Evaluate posts commentability
-        for (_i, _id, text, rating) in posts_data.iter_mut() {
+        for (_i, id, text, rating) in posts_data.iter_mut() {
             let response = request(
                 key.clone(),
                 format!(
@@ -75,6 +76,7 @@ pub async fn comment_posts(
             .await?;
 
             *rating = response.trim().parse().unwrap_or(0);
+            seen_ids.insert(id.clone()); // mark as rated regardless of score
 
             tokio::time::sleep(Duration::from_millis(rating_sleep_ms)).await;
         }
@@ -88,7 +90,7 @@ pub async fn comment_posts(
         println!("Found {} to comment on", filtered.len());
 
         if filtered.is_empty() {
-            page.evaluate("document.querySelector('main#workspace').scrollTop += 800")
+            page.evaluate("document.querySelector('main#workspace').scrollTop += 1000")
                 .await?;
             tokio::time::sleep(Duration::from_secs(2)).await;
             continue;
@@ -99,6 +101,9 @@ pub async fn comment_posts(
             if count >= comments_amount {
                 break;
             }
+
+            // Mark as seen immediately so we never try this post again even if something fails
+            commented_ids.insert(id.clone());
 
             let response = request(
                 key.clone(),
@@ -138,21 +143,29 @@ pub async fn comment_posts(
                 continue;
             }
 
-            tokio::time::sleep(Duration::from_secs(1)).await;
+            // Wait for editor to appear
+            tokio::time::sleep(Duration::from_secs(2)).await;
 
             // Type comment
-            page.evaluate(format!(
-                r#"(() => {{
-                    const item = document.querySelectorAll('[role=\'listitem\']')[{}];
-                    const editor = item.querySelector("[aria-label='Text editor for creating comment']");
-                    if (!editor) return false;
-                    editor.focus();
-                    document.execCommand('insertText', false, '{}');
-                    return true;
-                }})()"#,
-                i, comment
-            ))
-            .await?;
+            let typed: bool = page
+                .evaluate(format!(
+                    r#"(() => {{
+                        const item = document.querySelectorAll('[role=\'listitem\']')[{}];
+                        const editor = item.querySelector("[aria-label='Text editor for creating comment']");
+                        if (!editor) return false;
+                        editor.focus();
+                        document.execCommand('insertText', false, '{}');
+                        return true;
+                    }})()"#,
+                    i, comment
+                ))
+                .await?
+                .into_value()?;
+
+            if !typed {
+                eprintln!("⚠️ could not find comment editor for post {} — skipping", i);
+                continue;
+            }
 
             tokio::time::sleep(Duration::from_millis(comment_sleep_ms)).await;
 
@@ -171,13 +184,11 @@ pub async fn comment_posts(
                 .into_value()?;
 
             if !posted {
-                eprintln!("⚠️ could not post comment for post {} — skipping", i);
+                eprintln!("⚠️ could not submit comment for post {} — skipping", i);
                 continue;
             }
 
-            commented_ids.insert(id);
             count += 1;
-
             println!("Completed {}/{} comments", count, comments_amount);
 
             tokio::time::sleep(Duration::from_secs(2)).await;
@@ -221,7 +232,7 @@ pub async fn request(
                         wait_secs, attempt, max_retries
                     );
                     tokio::time::sleep(Duration::from_secs(wait_secs)).await;
-                    wait_secs *= 2; // exponential backoff
+                    wait_secs *= 2;
                 } else {
                     return Err(Box::new(e));
                 }
